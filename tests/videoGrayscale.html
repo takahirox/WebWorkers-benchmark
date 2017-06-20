@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+textarea {
+  width: 640px;
+}
+</style>
+<script src="https://rawgit.com/mrdoob/three.js/r85/build/three.js"></script>
+<script id="js_code">
+function grayscale(data, width, height) {
+  for (var i = 0, il = width * height; i < il; i++) {
+    var r = data[i*4+0];
+    var g = data[i*4+1];
+    var b = data[i*4+2];
+    data[i*4+0] = data[i*4+1] = data[i*4+2] =
+      (0.2126*r + 0.7152*g + 0.0722*b) | 0;
+  }
+}
+</script>
+<script id="test_code">
+function start() {
+  document.getElementById('run_button').disabled = true;
+  document.getElementById('message').innerText = 'Initializing';
+  setTimeout(start_);
+}
+
+function start_() {
+  var video = document.getElementById('original_video');
+
+  var width = video.videoWidth;
+  var height = video.videoHeight;
+  var length = width * height * 4;
+  var loop = 50;
+
+  var renderer = new THREE.WebGLRenderer({antialias: true});
+  var gl = renderer.getContext();
+  var texture = new THREE.Texture(video);
+  texture.minFilter = THREE.NearestFilter;
+  texture.magFilter = THREE.NearestFilter;
+  texture.format = THREE.RGBAFormat;
+  texture.wrapS = THREE.ClampToEdgeWrapping;
+  texture.wrapT = THREE.ClampToEdgeWrapping;
+
+  var renderTarget = new THREE.WebGLRenderTarget(width, height);
+
+  var camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+  var scene = new THREE.Scene();
+  var shader = {
+	uniforms: {
+		'tDiffuse':{ value: null}
+	},
+	vertexShader: [
+		'varying vec2 vUv;',
+		'void main() {',
+		'	vUv = uv;',
+		'	gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);',
+		'}'
+	].join('\n'),
+	fragmentShader: [
+		'uniform sampler2D tDiffuse;',
+		'varying vec2 vUv;',
+		'void main() {',
+		'	gl_FragColor = texture2D(tDiffuse, vec2(vUv.x, 1.0-vUv.y));',
+		'}'
+	].join('\n')
+  };
+  var material = new THREE.ShaderMaterial({
+      uniforms: THREE.UniformsUtils.clone(shader.uniforms),
+      vertexShader: shader.vertexShader,
+      fragmentShader: shader.fragmentShader
+  });
+  material.uniforms['tDiffuse'].value = texture;
+  var quad = new THREE.Mesh(new THREE.PlaneBufferGeometry(2, 2), material);
+  quad.frustumCulled = false; // Avoid getting clipped
+  scene.add(quad);
+
+  var jsPerformance = document.getElementById('js_performance');
+  var workerPerformance = document.getElementById('worker_performance');
+  var comparison = document.getElementById('comparison');
+
+  jsPerformance.innerText = '';
+  workerPerformance.innerText = '';
+  comparison.innerText = '';
+
+  var jsCanvas = document.getElementById('js_canvas');
+  jsCanvas.width = width;
+  jsCanvas.height = height;
+  var jsContext = jsCanvas.getContext('2d');
+
+  var workerCanvas = document.getElementById('worker_canvas');
+  workerCanvas.width = width;
+  workerCanvas.height = height;
+  var workerContext = workerCanvas.getContext('2d');
+
+  var array = new Uint8Array(length);
+
+  var mid = (array.buffer.byteLength / 2) | 0;
+  var buffer1 = array.buffer.slice(0, mid);
+  var buffer2 = array.buffer.slice(mid, array.buffer.byteLength);
+  var array1 = new Uint8Array(buffer1);
+  var array2 = new Uint8Array(buffer2);
+
+  var worker1 = new Worker('./grayscale_worker.js');
+  var worker2 = new Worker('./grayscale_worker.js');
+
+  function captureOriginalPixels() {
+    texture.needsUpdate = true;
+    renderer.render(scene, camera, renderTarget);
+    gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, array);
+    for (var i = 0, il = array1.length; i < il; i++) {
+      array1[i] = array[i];
+      array2[i] = array[i+array1.length];
+    }
+  }
+
+  function checkFunctionality(callback) {
+    captureOriginalPixels();
+    runJS(function() {
+      runWorkers(function() {
+        renderResults();
+        var match = true;
+        for (var i = 0, il = array1.length; i < il; i++) {
+          if (array[i] !== array1[i]) match = false;
+        }
+        for (var i = 0, il = array2.length; i < il; i++) {
+          if (array[i+array1.length] !== array2[i]) match = false;
+        }
+        callback(match);
+      });
+    });
+  }
+
+  function renderResults() {
+    jsContext.putImageData(
+      new ImageData(new Uint8ClampedArray(array.buffer), width, height),
+      0, 0);
+    workerContext.putImageData(
+      new ImageData(new Uint8ClampedArray(array1.buffer), width, height * 0.5),
+      0, 0);
+    workerContext.putImageData(
+      new ImageData(new Uint8ClampedArray(array2.buffer), width, height * 0.5),
+      0, height * 0.5);
+  }
+
+  function runWorkers(callback) {
+    var doneNum = 0;
+    worker1.postMessage({
+      data: array1,
+      width: width,
+      height: height * 0.5
+    }, [
+      array1.buffer
+    ]);
+    worker2.postMessage({
+      data: array2,
+      width: width,
+      height: height * 0.5
+    }, [
+      array2.buffer
+    ]);
+    function onMessage(event) {
+      if (++doneNum === 2) callback();
+    }
+    worker1.onmessage = function (event) {
+      array1 = event.data.data;
+      onMessage(event);
+    };
+    worker2.onmessage = function (event) {
+      array2 = event.data.data;
+      onMessage(event);
+    };
+  }
+
+  function runJS(callback) {
+    grayscale(array, width, height);
+    callback();
+  }
+
+  function run(func, loop, callback) {
+    var elapsedTime = 0.0;
+    var count = 1;
+    function step() {
+      var startTime = performance.now();
+      func(function() {
+        var endTime = performance.now();
+        if (count > 0) elapsedTime += endTime - startTime;
+        count++;
+        if (count === loop + 1) {
+          callback(elapsedTime);
+        } else {
+          step();
+        }
+      });
+    }
+    step();
+  }
+
+  var jsElapsedTime = 0.0;
+  var workerElapsedTime = 0.0;
+  var count = 0;
+
+  function render() {
+    captureOriginalPixels();
+    run(runJS, 1, function(elapsedTime1) {
+      run(runWorkers, 1, function(elapsedTime2) {
+        jsElapsedTime += elapsedTime1;
+        workerElapsedTime += elapsedTime2;
+        renderResults();
+        count++;
+        if (count === loop) {
+          jsPerformance.innerText = (jsElapsedTime / loop).toFixed(4);
+          workerPerformance.innerText = (workerElapsedTime / loop).toFixed(4);
+          comparison.innerText =
+            (Number(jsPerformance.innerText) /
+               Number(workerPerformance.innerText)).toFixed(4);
+          jsElapsedTime = 0.0;
+          workerElapsedTime = 0.0;
+          count = 0;
+        }
+        requestAnimationFrame(render);
+      });
+    });
+  }
+
+  // don't use Promise for the non Promise support browsers so far.
+  setTimeout(function () {
+    checkFunctionality(function(match) {
+      if (! match) {
+        document.getElementById('message').innerText =
+          'Two functions seem not equeal';
+        document.getElementById('run_button').disabled = false;
+        return;
+      }
+      render();
+      document.getElementById('message').innerText = 'Running';
+    });
+  });
+
+  document.getElementById('message').innerText = 'Checking equality';
+}
+</script>
+<script>
+function onReady() {
+  document.getElementById('run_button').disabled = false;
+  document.getElementById('message').innerText = 'Ready';
+}
+
+function init() {
+  putCode('test_code_area', document.getElementById('test_code').text.trim());
+  putCode('js_code_area', document.getElementById('js_code').text.trim());
+
+  loadTextFile('grayscale_worker.js', function(text) {
+    putCode('worker_code_area', text.trim());
+  });
+
+  onReady();
+}
+
+function loadTextFile(url, callback) {
+  var request = new XMLHttpRequest();
+  request.open('GET', url);
+  request.responseType = 'text';
+  request.onload = function (event) {
+    callback(request.response);
+  };
+  request.send();
+}
+
+function putCode(textareaId, code) {
+  var textarea = document.getElementById(textareaId);
+  textarea.value = code;
+  textarea.setAttribute('rows', code.split('\n').length);
+}
+
+function switchDisplay(div) {
+  var textareas = div.getElementsByTagName('textarea');
+  var spans = div.getElementsByTagName('span');
+  var element = textareas.length > 0 ? textareas[0] : spans[0];
+  var p = div.getElementsByTagName('p')[0];
+  p.textContent = p.textContent.slice(2);
+  if (element.style.display === 'none') {
+    element.style.display = '';
+    p.textContent = '- ' + p.textContent;
+  } else {
+    element.style.display = 'none';
+    p.textContent = '+ ' + p.textContent;
+  }
+}</script>
+</head>
+<body onload="init()">
+  <div>
+    <p>
+      <button id="run_button" onclick="start()" disabled>run</button>
+      <span id="message"></span>
+    </p>
+    <p>
+      Result (average [ms])<br />
+      JavaScript: <span id="js_performance"></span><br />
+      Worker: <span id="worker_performance"></span><br />
+      JavaScript/Worker: <span id="comparison"></span><br />
+    </p>
+  </div>
+  <div>
+    <p onclick="switchDisplay(this.parentNode)">+ Videos</p>
+    <span style="display:none">
+      Original<br />
+      <video id="original_video" loop autoplay muted src="../videos/marker.mp4" type="video/mp4"></video><br />
+      JavaScript<br />
+      <canvas id="js_canvas"></canvas><br />
+      Workers<br />
+      <canvas id="worker_canvas"></canvas><br />
+    </span>
+  </div>
+  <div>
+    <p onclick="switchDisplay(this.parentNode)">+ Test code</p>
+    <p><textarea id="test_code_area" readonly style="display:none"></textarea></p>
+  </div>
+  <div>
+    <p onclick="switchDisplay(this.parentNode)">- JavaScript code</p>
+    <p><textarea id="js_code_area" readonly></textarea></p>
+  </div>
+  <div>
+    <p onclick="switchDisplay(this.parentNode)">- Worker code</p>
+    <p><textarea id="worker_code_area" readonly></textarea></p>
+  </div>
+</body>
+</html>

@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+textarea {
+  width: 640px;
+}
+</style>
+<script id="js_code">
+function sum(array) {
+  var s = 0.0;
+  for (var i = 0, il = array.length; i < il; i++) {
+    s += array[i];
+  }
+  return s;
+}
+</script>
+<script id="test_code">
+function start() {
+  document.getElementById('run_button').disabled = true;
+  document.getElementById('message').innerText = 'Initializing';
+  setTimeout(start_);
+}
+
+function start_() {
+  var num = 0x2000000;
+  var loop = 10;
+
+  var array = new Float64Array(num);
+
+  for (var i = 0, il = array.length; i < il; i++) {
+    array[i] = Math.random() * 2000.0 - 1000.0;
+  }
+
+  var mid = (array.buffer.byteLength / 2) | 0;
+  var buffer1 = array.buffer.slice(0, mid);
+  var buffer2 = array.buffer.slice(mid, array.buffer.byteLength);
+  var array1 = new Float64Array(buffer1);
+  var array2 = new Float64Array(buffer2);
+
+  var worker1 = new Worker('./sum_worker.js');
+  var worker2 = new Worker('./sum_worker.js');
+
+  var jsPerformance = document.getElementById('js_performance');
+  var workerPerformance = document.getElementById('worker_performance');
+  var comparison = document.getElementById('comparison');
+
+  jsPerformance.innerText = '';
+  workerPerformance.innerText = '';
+  comparison.innerText = '';
+
+  function checkFunctionality(callback) {
+    runJS(function(result1) {
+      runWorkers(function(result2) {
+        callback(Math.abs(result1 - result2) < 0.00001);
+      });
+    });
+  }
+
+  function runWorkers(callback) {
+    var results = [];
+    worker1.postMessage(array1, [array1.buffer]);
+    worker2.postMessage(array2, [array2.buffer]);
+    function onMessage(event) {
+      var result = event.data.result;
+      results.push(result);
+      if (results.length === 2) done();
+    }
+    function done() {
+      callback(results[0] + results[1]);
+    }
+    worker1.onmessage = function (event) {
+      array1 = event.data.array;
+      onMessage(event);
+    };
+    worker2.onmessage = function (event) {
+      array2 = event.data.array;
+      onMessage(event);
+    };
+  }
+
+  function runJS(callback) {
+    callback(sum(array));
+  }
+
+  function run(func, loop, callback) {
+    var elapsedTime = 0.0;
+    var count = 0;
+    function step() {
+      var startTime = performance.now();
+      func(function(result) {
+        var endTime = performance.now();
+        if (count > 0) elapsedTime += endTime - startTime;
+        count++;
+        if (count === loop + 1) {
+          callback((elapsedTime / loop).toFixed(4));
+        } else {
+          step();
+        }
+      });
+    }
+    step();
+  }
+
+  // don't use Promise for the non Promise support browsers so far.
+  setTimeout(function () {
+    checkFunctionality(function(match) {
+      if (! match) {
+        document.getElementById('message').innerText =
+          'Two functions seem not equeal';
+        document.getElementById('run_button').disabled = false;
+        return;
+      }
+      setTimeout(function () {
+        run(runJS, loop, function(elapsedTime1) {
+          jsPerformance.innerText = elapsedTime1;
+          run(runWorkers, loop, function(elapsedTime2) {
+            workerPerformance.innerText = elapsedTime2;
+            comparison.innerText =
+              (Number(elapsedTime1) / Number(elapsedTime2)).toFixed(4);
+            document.getElementById('message').innerText = 'Done';
+            document.getElementById('run_button').disabled = false;
+          });
+          document.getElementById('message').innerText = 'Running Workers';
+        });
+      });
+      document.getElementById('message').innerText = 'Running JavaScript';
+    });
+  });
+
+  document.getElementById('message').innerText = 'Checking equality';
+}
+</script>
+<script>
+function onReady() {
+  document.getElementById('run_button').disabled = false;
+  document.getElementById('message').innerText = 'Ready';
+}
+
+function init() {
+  putCode('test_code_area', document.getElementById('test_code').text.trim());
+  putCode('js_code_area', document.getElementById('js_code').text.trim());
+
+  loadTextFile('sum_worker.js', function(text) {
+    putCode('worker_code_area', text.trim());
+  });
+
+  onReady();
+}
+
+function loadTextFile(url, callback) {
+  var request = new XMLHttpRequest();
+  request.open('GET', url);
+  request.responseType = 'text';
+  request.onload = function (event) {
+    callback(request.response);
+  };
+  request.send();
+}
+
+function putCode(textareaId, code) {
+  var textarea = document.getElementById(textareaId);
+  textarea.value = code;
+  textarea.setAttribute('rows', code.split('\n').length);
+}
+
+function switchDisplay(div) {
+  var textarea = div.getElementsByTagName('textarea')[0];
+  var p = div.getElementsByTagName('p')[0];
+  p.textContent = p.textContent.slice(2);
+  if (textarea.style.display === 'none') {
+    textarea.style.display = '';
+    p.textContent = '- ' + p.textContent;
+  } else {
+    textarea.style.display = 'none';
+    p.textContent = '+ ' + p.textContent;
+  }
+}
+</script>
+</head>
+<body onload="init()">
+  <div>
+    <p>
+      <button id="run_button" onclick="start()" disabled>run</button>
+      <span id="message"></span>
+    </p>
+    <p>
+      Result (average [ms])<br />
+      JavaScript: <span id="js_performance"></span><br />
+      Worker: <span id="worker_performance"></span><br />
+      JavaScript/Worker: <span id="comparison"></span><br />
+    </p>
+  </div>
+  <div>
+    <p onclick="switchDisplay(this.parentNode)">+ Test code</p>
+    <p><textarea id="test_code_area" readonly style="display:none"></textarea></p>
+  </div>
+  <div>
+    <p onclick="switchDisplay(this.parentNode)">- JavaScript code</p>
+    <p><textarea id="js_code_area" readonly></textarea></p>
+  </div>
+  <div>
+    <p onclick="switchDisplay(this.parentNode)">- Worker code</p>
+    <p><textarea id="worker_code_area" readonly></textarea></p>
+  </div>
+</body>
+</html>
